@@ -6,18 +6,16 @@ import jwt
 import datetime                                      
 import io                            
 import yaml
-from dotenv import load_dotenv
 import os
 from bson.objectid import ObjectId
 
-load_dotenv()
-
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.getenv("SECRET_KEY")
+app.config["SECRET_KEY"] = "127319762836dbybxqtvxf65143cxv1gzv897xercre8x1csfqx1r6cx81e"
 CORS(app, resources={r"/*": {"origins": "*"}}, expose_headers=["Authorization"])
 
-app.config["MONGO_URI"] = os.getenv("MONGO_URI")
+app.config["MONGO_URI"] = "mongodb+srv://otaviofetterg:XK3vyzB91lTOPrTS@fad.vikvn.mongodb.net/fad?retryWrites=true&w=majority&appName=fad"
 
+# Testa a conexão com o banco MongoDB
 try:
     client = MongoClient(app.config["MONGO_URI"])
     mongo = client["fad"]
@@ -43,6 +41,7 @@ def createDockerfile():
 
     # Recebe os valores do JSON
     base_image = form_dockerfile.get('baseImage')
+    workdir = form_dockerfile.get('workdir')
     framework = form_dockerfile.get('framework', '').strip() or None
     dependencies = form_dockerfile.get('dependencies', '').strip() or None
     gpu_support = form_dockerfile.get('gpuSupport', False)
@@ -59,21 +58,49 @@ def createDockerfile():
         return "\n".join([f"EXPOSE {port.strip()}" for port in ports.split(',') if port.strip()])
 
     # Monta o Dockerfile
-    dockerfile_content = f"# Dockerfile Gerado\n\nFROM {base_image}\n\n"
-    if framework:
-        dockerfile_content += f"# Instalar framework de IA\nRUN pip install {framework}\n\n"
+    dockerfile_content = f"# Dockerfile Gerado\n\n# Imagem base\nFROM {base_image}\n\n"
+
+    # Instalar o APT e Python, se necessário
+    if base_image not in ["python:latest", "nvidia/cuda:11.8-cudnn8-devel-ubuntu20.04"]:
+        dockerfile_content += "# Atualizar o APT\nRUN apt-get update && \\\n    apt-get install -y python3 python3-pip && \\\n    apt-get clean && rm -rf /var/lib/apt/lists/*\n\n"
+
+    # Definir o diretório de trabalho, se fornecido
+    if workdir:
+        dockerfile_content += f"# Setando o ambiente de trabalho\nWORKDIR {workdir}\n\n"
+
+    # Instalar dependências adicionais, se fornecidas
     if dependencies:
-        dockerfile_content += f"# Instalar dependências adicionais\nRUN pip install {dependencies}\n\n"
+        dockerfile_content += f"# Instalar dependências adicionais\nRUN python3 -m pip install {dependencies}\n\n"
+
+    # Copiar e instalar do requirements.txt, se solicitado
     if use_requirements:
-        dockerfile_content += "COPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\n\n"
-    if gpu_support:
-        dockerfile_content += "RUN apt-get update && apt-get install -y cuda\n\n"
+        dockerfile_content += f"# Copiando o requirements.txt\nCOPY requirements.txt {workdir}/requirements.txt\n\n"
+        dockerfile_content += f"# Instalando dependências do requirements.txt\nRUN python3 -m pip install --no-cache-dir -r {workdir}/requirements.txt\n\n"
+
+    # Instalar framework de IA, se especificado
+    if framework:
+        dockerfile_content += f"# Instalar framework de IA\nRUN python3 -m pip install {framework}\n\n"
+
+    dockerfile_content += f"# Copia os arquivos do diretório\nCOPY . .\n\n"
+
+    # Instalar CUDA, se GPU estiver habilitado
+    if gpu_support not in["nvidia/cuda:11.8-cudnn8-devel-ubuntu20.04"]:
+        dockerfile_content += "# Instalando o CUDA\n"
+        dockerfile_content += "RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb && \\\n    dpkg -i cuda-keyring_1.0-1_all.deb && apt-get update && \\\n    apt-get install -y cuda && \\\n    apt-get clean && rm -rf /var/lib/apt/lists/*\n\n"
+
+    # Adicionar variáveis de ambiente, se fornecidas
     if env_vars:
-        dockerfile_content += "# Variáveis de Ambiente\n" + add_env_vars(env_vars) + "\n\n"
+        dockerfile_content += "# Variáveis de Ambiente\n"
+        dockerfile_content += add_env_vars(env_vars) + "\n\n"
+
+    # Expor portas, se fornecido
     if ports:
-        dockerfile_content += "# Expor portas\n" + add_ports(ports) + "\n\n"
+        dockerfile_content += "# Expor portas\n"
+        dockerfile_content += add_ports(ports) + "\n\n"
+
+    # Definir o comando de inicialização, se fornecido
     if startup_script:
-        startup_command = '["' + '", "'.join(startup_script.split()) + '"]'
+        startup_command = '# Comando para iniciar a aplicação \n["' + '", "'.join(startup_script.split()) + '"]'
         dockerfile_content += f'CMD {startup_command}\n'
 
     # Dockerfile em memória
@@ -83,6 +110,7 @@ def createDockerfile():
     if user_id:
         dockerfile_data = {
             "base_image": base_image,
+            "workdir": workdir,
             "framework": framework,
             "dependencies": dependencies,
             "gpu_support": gpu_support,
@@ -90,7 +118,7 @@ def createDockerfile():
             "ports": ports,
             "startup_script": startup_script,
             "use_requirements": use_requirements,
-            "created_at": datetime.datetime.utcnow(),
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
             "user_id": user_id
         }
         # Remove campos nulos ou vazios antes de salvar
@@ -109,14 +137,15 @@ def createDockerCompose():
 
     # Recebe os valores do JSON
     service_name = form_dockercompose.get('service')
-    base_image = form_dockercompose.get('baseImage')
-    framework = form_dockercompose.get('framework', '').strip()
-    dependencies = form_dockercompose.get('dependencies', '').strip()
+    base_image = form_dockercompose.get('baseImage', '')
+    workdir = form_dockercompose.get('workdir', '')
     gpu_support = form_dockercompose.get('gpuSupport', False)
     env_vars = form_dockercompose.get('envVars', '').strip()
     ports = form_dockercompose.get('ports', '').strip()
     startup_script = form_dockercompose.get('startupScript', '').strip()
     use_requirements = form_dockercompose.get('useRequirements', False)
+    use_dockerfile = form_dockercompose.get('useDockerfile', False)
+    context = form_dockercompose.get('context', '')
 
     # Função auxiliar para configurar variáveis de ambiente
     def add_env_vars(env_vars):
@@ -131,12 +160,15 @@ def createDockerCompose():
         'version': '3.8',
         'services': {
             service_name: {
-                'image': base_image
             }
         }
     }
 
     # Adiciona as configurações apenas se houverem valores válidos
+    if base_image and not use_dockerfile:
+        docker_compose_content['services'][service_name]['image'] = base_image
+    if workdir and not use_dockerfile:
+        docker_compose_content['services'][service_name]['working_dir'] = workdir
     if ports:
         docker_compose_content['services'][service_name]['ports'] = add_ports(ports)
     if env_vars:
@@ -145,13 +177,11 @@ def createDockerCompose():
         docker_compose_content['services'][service_name]['command'] = startup_script.split()
 
     # Adiciona a seção de build apenas se for necessário
-    if framework or dependencies or use_requirements:
+    if use_dockerfile:
         docker_compose_content['services'][service_name]['build'] = {
-            'context': '.',
+            'context': context,
             'dockerfile': 'Dockerfile'
         }
-        if use_requirements:
-            docker_compose_content['services'][service_name].setdefault('volumes', []).append('./requirements.txt:/app/requirements.txt')
 
     # Adiciona suporte a GPU apenas se necessário
     if gpu_support:
@@ -178,14 +208,14 @@ def createDockerCompose():
         dockercompose_data = {
             "service_name": service_name,
             "base_image": base_image,
-            "framework": framework,
-            "dependencies": dependencies,
+            "use_dockerfile": use_dockerfile,
+            "workdir": workdir,
             "gpu_support": gpu_support,
             "env_vars": env_vars,
             "ports": ports,
             "startup_script": startup_script,
-            "use_requirements": use_requirements,
-            "created_at": datetime.datetime.utcnow(),
+            "context": context,
+            "created_at": datetime.datetime.now(datetime.timezone.utc),
             "user_id": user_id
         }
         # Remove campos nulos ou vazios antes de salvar
@@ -240,7 +270,7 @@ def login_user():
     else:
         return jsonify({"error": "Nome de usuário ou senha incorretos"}), 401
 
-# Rota protegida de exemplo
+# Rota protegida
 @app.route('/protected', methods=['GET'])
 def protected_route():
     token = request.headers.get("Authorization")
@@ -292,6 +322,7 @@ def dockerfile_history():
             dockerfile_data = {
                 "_id": str(dockerfile["_id"]),
                 "base_image": dockerfile_data.get("base_image", ""),
+                "workdir": dockerfile_data.get("workdir", ""),
                 "framework": dockerfile_data.get("framework", ""),
                 "dependencies": dockerfile_data.get("dependencies", ""),
                 "gpu_support": dockerfile_data.get("gpu_support", False),
@@ -362,6 +393,7 @@ def create_dockerfile_history():
 
     # Recebe as informações do Dockerfile
     base_image = form_data.get('base_image')
+    workdir = form_data.get('workdir')
     framework = form_data.get('framework', '').strip() or None
     dependencies = form_data.get('dependencies', '').strip() or None
     gpu_support = form_data.get('gpu_support', False)
@@ -377,22 +409,57 @@ def create_dockerfile_history():
     def add_ports(ports):
         return "\n".join([f"EXPOSE {port.strip()}" for port in ports.split(',') if port.strip()])
 
+    # Funções auxiliares
+    def add_env_vars(env_vars):
+        return "\n".join([f"ENV {env.strip()}" for env in env_vars.split(',') if env.strip()])
+
+    def add_ports(ports):
+        return "\n".join([f"EXPOSE {port.strip()}" for port in ports.split(',') if port.strip()])
+
     # Monta o Dockerfile
-    dockerfile_content = f"FROM {base_image}\n\n"
-    if framework:
-        dockerfile_content += f"# Instalar framework de IA\nRUN pip install {framework}\n\n"
+    dockerfile_content = f"# Dockerfile Gerado\n\nFROM {base_image}\n\n"
+
+    # Instalar o APT e Python, se necessário
+    if base_image not in ["python:latest", "nvidia/cuda:11.8-cudnn8-devel-ubuntu20.04"]:
+        dockerfile_content += "# Atualizar o APT\nRUN apt-get update && \\\n    apt-get install -y python3 python3-pip && \\\n    apt-get clean && rm -rf /var/lib/apt/lists/*\n\n"
+
+    # Definir o diretório de trabalho, se fornecido
+    if workdir:
+        dockerfile_content += f"# Setando o ambiente de trabalho\nWORKDIR {workdir}\n\n"
+
+    # Instalar dependências adicionais, se fornecidas
     if dependencies:
-        dockerfile_content += f"# Instalar dependências adicionais\nRUN pip install {dependencies}\n\n"
+        dockerfile_content += f"# Instalar dependências adicionais\nRUN python3 -m pip install {dependencies}\n\n"
+
+    # Copiar e instalar do requirements.txt, se solicitado
     if use_requirements:
-        dockerfile_content += "COPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\n\n"
-    if gpu_support:
-        dockerfile_content += "RUN apt-get update && apt-get install -y cuda\n\n"
+        dockerfile_content += f"# Copiando o requirements.txt\nCOPY requirements.txt {workdir}/requirements.txt\n\n"
+        dockerfile_content += f"# Instalando dependências do requirements.txt\nRUN python3 -m pip install --no-cache-dir -r {workdir}/requirements.txt\n\n"
+
+    # Instalar framework de IA, se especificado
+    if framework:
+        dockerfile_content += f"# Instalar framework de IA\nRUN python3 -m pip install {framework}\n\n"
+
+    dockerfile_content += f"# Copia os arquivos do diretório\nCOPY . .\n\n"
+
+    # Instalar CUDA, se GPU estiver habilitado
+    if gpu_support not in["nvidia/cuda:11.8-cudnn8-devel-ubuntu20.04"]:
+        dockerfile_content += "# Instalando o CUDA\n"
+        dockerfile_content += "RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.0-1_all.deb && \\\n    dpkg -i cuda-keyring_1.0-1_all.deb && apt-get update && \\\n    apt-get install -y cuda && \\\n    apt-get clean && rm -rf /var/lib/apt/lists/*\n\n"
+
+    # Adicionar variáveis de ambiente, se fornecidas
     if env_vars:
-        dockerfile_content += "# Variáveis de Ambiente\n" + add_env_vars(env_vars) + "\n\n"
+        dockerfile_content += "# Variáveis de Ambiente\n"
+        dockerfile_content += add_env_vars(env_vars) + "\n\n"
+
+    # Expor portas, se fornecido
     if ports:
-        dockerfile_content += "# Expor portas\n" + add_ports(ports) + "\n\n"
+        dockerfile_content += "# Expor portas\n"
+        dockerfile_content += add_ports(ports) + "\n\n"
+
+    # Definir o comando de inicialização, se fornecido
     if startup_script:
-        startup_command = '["' + '", "'.join(startup_script.split()) + '"]'
+        startup_command = '# Comando para iniciar a aplicação \n["' + '", "'.join(startup_script.split()) + '"]'
         dockerfile_content += f'CMD {startup_command}\n'
 
     # Enviar o Dockerfile como um arquivo para o frontend
@@ -434,15 +501,14 @@ def dockercompose_history():
                 "_id": str(dockercompose["_id"]),
                 "service_name": dockercompose_data.get("service_name", ""),
                 "base_image": dockercompose_data.get("base_image", ""),
-                "framework": dockercompose_data.get("framework", ""),
-                "dependencies": dockercompose_data.get("dependencies", ""),
+                "use_dockerfile": dockercompose_data.get("use_dockerfile", False),
+                "workdir": dockercompose_data.get("workdir", ""),
                 "gpu_support": dockercompose_data.get("gpu_support", False),
                 "env_vars": dockercompose_data.get("env_vars", ""),
                 "ports": dockercompose_data.get("ports", ""),
                 "startup_script": dockercompose_data.get("startup_script", ""),
-                "use_requirements": dockercompose_data.get("use_requirements", False),
+                "context": dockercompose_data.get("context", ""),
                 "created_at": dockercompose_data.get("created_at", ""),
-                "content": dockercompose_data.get("content", "")
             }
 
             history.append(dockercompose_data)
@@ -504,14 +570,16 @@ def create_dockercompose_history():
 
     # Recebe as informações do Dockerfile
     service_name = form_data.get('service_name')
-    base_image = form_data.get('base_image')
-    framework = form_data.get('framework', '').strip() or None
-    dependencies = form_data.get('dependencies', '').strip() or None
+    base_image = form_data.get('base_image', '')
+    use_dockerfile = form_data.get('use_dockerfile', False)
+    workdir = form_data.get('workdir', '')
     gpu_support = form_data.get('gpu_support', False)
     env_vars = form_data.get('env_vars', '').strip() or None
     ports = form_data.get('ports', '').strip() or None
+    context = form_data.get('context', '')
     startup_script = form_data.get('startup_script', '').strip() or None
-    use_requirements = form_data.get('use_requirements', False)
+
+    print(f"Service Name Recebido: {service_name}")
 
     # Função auxiliar para configurar variáveis de ambiente
     def add_env_vars(env_vars):
@@ -522,38 +590,39 @@ def create_dockercompose_history():
         return [port.strip() for port in ports.split(',') if port.strip()]
 
     # Cria o conteúdo do docker-compose.yml
-    dockercompose_content = {
+    docker_compose_content = {
         'version': '3.8',
         'services': {
             service_name: {
-                'image': base_image
             }
         }
     }
 
     # Adiciona as configurações apenas se houverem valores válidos
+    if base_image and not use_dockerfile:
+        docker_compose_content['services'][service_name]['image'] = base_image
+    if workdir and not use_dockerfile:
+        docker_compose_content['services'][service_name]['working_dir'] = workdir
     if ports:
-        dockercompose_content['services'][service_name]['ports'] = add_ports(ports)
+        docker_compose_content['services'][service_name]['ports'] = add_ports(ports)
     if env_vars:
-        dockercompose_content['services'][service_name]['environment'] = add_env_vars(env_vars)
+        docker_compose_content['services'][service_name]['environment'] = add_env_vars(env_vars)
     if startup_script:
-        dockercompose_content['services'][service_name]['command'] = startup_script.split()
+        docker_compose_content['services'][service_name]['command'] = startup_script.split()
 
     # Adiciona a seção de build apenas se for necessário
-    if framework or dependencies or use_requirements:
-        dockercompose_content['services'][service_name]['build'] = {
-            'context': '.',
+    if use_dockerfile:
+        docker_compose_content['services'][service_name]['build'] = {
+            'context': context,
             'dockerfile': 'Dockerfile'
         }
-        if use_requirements:
-            dockercompose_content['services'][service_name].setdefault('volumes', []).append('./requirements.txt:/app/requirements.txt')
 
     # Adiciona suporte a GPU apenas se necessário
     if gpu_support:
-        dockercompose_content['services'][service_name]['runtime'] = 'nvidia'
+        docker_compose_content['services'][service_name]['runtime'] = 'nvidia'
 
     # Gera o arquivo docker-compose.yml em memória
-    dockercompose_yaml = yaml.dump(dockercompose_content, default_flow_style=False)
+    dockercompose_yaml = yaml.dump(docker_compose_content, default_flow_style=False)
     dockercompose_bytes = io.BytesIO(dockercompose_yaml.encode('utf-8'))
 
     return send_file(dockercompose_bytes, as_attachment=True, download_name="docker-compose.yml", mimetype="text/plain")
