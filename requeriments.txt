@@ -3,3 +3,5 @@ Flask-PyMongo
 Flask-Cors
 Werkzeug
 python-dotenv
+PyJWT
+PyYAML
