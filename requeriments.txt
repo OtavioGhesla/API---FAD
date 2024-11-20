@@ -5,3 +5,4 @@ Werkzeug
 python-dotenv
 PyJWT
 PyYAML
+gunicorn
